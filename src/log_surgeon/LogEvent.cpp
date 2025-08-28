@@ -2,12 +2,16 @@
 
 #include <memory>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <log_surgeon/Constants.hpp>
+#include <log_surgeon/finite_automata/PrefixTree.hpp>
 #include <log_surgeon/LogParser.hpp>
 #include <log_surgeon/LogParserOutputBuffer.hpp>
 #include <log_surgeon/Token.hpp>
+
+#include <ystdlib/error_handling/Result.hpp>
 
 namespace log_surgeon {
 LogEventView::LogEventView(LogParser const& log_parser)
@@ -26,6 +30,57 @@ auto LogEventView::reset() -> void {
     }
     m_log_output_buffer->reset();
     m_multiline = false;
+}
+
+[[nodiscard]] auto LogEventView::get_capture(
+        std::string const& variable_name,
+        std::string const& capture_name,
+        size_t const occurrence
+) const -> ystdlib::error_handling::Result<std::string_view> {
+    auto const& lexer{get_log_parser().m_lexer};
+    auto const variable_id{get_log_parser().get_symbol_id(variable_name)};
+    if (false == variable_id.has_value()) {
+        return std::make_error_code(std::errc::invalid_argument);
+    }
+
+    for (auto* const var_token : get_variables(variable_id.value())) {
+        auto const token_type{var_token->m_type_ids_ptr->at(0)};
+        auto capture_ids{lexer.get_capture_ids_from_rule_id(token_type)};
+        if (false == capture_ids.has_value()) {
+            return std::make_error_code(std::errc::invalid_argument);
+        }
+        for (auto const capture_id : capture_ids.value()) {
+            if (capture_name != lexer.m_id_symbol.at(capture_id)) {
+                continue;
+            }
+            auto const register_ids{lexer.get_reg_ids_from_capture_id(capture_id)};
+            if (false == register_ids.has_value()) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            auto const [start_reg_id, end_reg_id]{register_ids.value()};
+            auto const start_positions{var_token->get_reversed_reg_positions(start_reg_id)};
+            auto const end_positions{var_token->get_reversed_reg_positions(end_reg_id)};
+            if (start_positions.size() < occurrence || end_positions.size() < occurrence) {
+                return std::make_error_code(std::errc::invalid_argument);
+            }
+
+            auto const capture_len = [&]() -> size_t {
+                if (start_positions[occurrence] <= end_positions[occurrence]) {
+                    return end_positions[occurrence] - start_positions[occurrence];
+                }
+                return var_token->get_length() - start_positions[occurrence]
+                       + start_positions[occurrence];
+            }();
+
+            return var_token->to_string_view().substr(start_positions[occurrence], capture_len);
+            /* return std::string_view( */
+            /*         var_token->m_buffer + start_positions[occurrence], */
+            /*         end_positions[occurrence] - start_positions[occurrence] */
+            /* ); */
+        }
+    }
+    return std::make_error_code(std::errc::invalid_argument);
 }
 
 [[nodiscard]] auto LogEventView::get_timestamp() const -> Token* {

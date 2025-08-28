@@ -27,6 +27,7 @@ tasks:
       - "install-catch2"
       - "install-fmt"
       - "install-microsoft.gsl"
+      - "install-ystdlib"
 
   install-catch2:
     internal: true
@@ -75,4 +76,20 @@ tasks:
           CMAKE_SETTINGS_DIR: "{{.G_DEPS_CMAKE_SETTINGS_DIR}}"
           TAR_SHA256: "f0e32cb10654fea91ad56bde89170d78cfbf4363ee0b01d8f097de2ba49f6ce9"
           TAR_URL: "https://github.com/microsoft/GSL/archive/refs/tags/v4.0.0.tar.gz"
+          WORK_DIR: "{{.G_DEPS_DIR}}"
+
+  install-ystdlib:
+    internal: true
+    run: "once"
+    cmds:
+      - task: "utils:cmake:install-remote-tar"
+        vars:
+          CMAKE_GEN_ARGS:
+            - "-DCMAKE_BUILD_TYPE=Release"
+            - "-DCMAKE_INSTALL_MESSAGE=LAZY"
+            - "-Dystdlib_BUILD_TESTING=OFF"
+          CMAKE_PACKAGE_NAME: "ystdlib"
+          CMAKE_SETTINGS_DIR: "{{.G_DEPS_CMAKE_SETTINGS_DIR}}"
+          TAR_SHA256: "65990dc2bcc4a355c2181bfe31a7800f492309d1bcd340f52a34e85047e61bc8"
+          TAR_URL: "https://github.com/y-scope/ystdlib-cpp/archive/9ed78cd.tar.gz"
           WORK_DIR: "{{.G_DEPS_DIR}}"

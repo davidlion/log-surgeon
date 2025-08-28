@@ -3,10 +3,13 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <log_surgeon/LogParserOutputBuffer.hpp>
 #include <log_surgeon/Token.hpp>
+
+#include <ystdlib/error_handling/Result.hpp>
 
 namespace log_surgeon {
 class LogParser;
@@ -53,6 +56,34 @@ public:
     [[nodiscard]] auto get_variables(size_t variable_id) const -> std::vector<Token*> const& {
         return m_log_var_occurrences[variable_id];
     }
+
+    /**
+     * Get the first occurance of a matched capture group in a variable.
+     *
+     * @param variable_name Name of the variable rule from the schema.
+     * @param caputre_name Name of the capture group within the variable rule.
+     * @return Match of the capture group.
+     * @return errc::invalid_argument if the variable or capture name is not found.
+     */
+    [[nodiscard]] auto
+    get_capture(std::string const& variable_name, std::string const& capture_name) const
+            -> ystdlib::error_handling::Result<std::string_view> {
+        return get_capture(variable_name, capture_name, 0);
+    }
+
+    /**
+     * Get the specified occurance of a matched capture group in a variable.
+     *
+     * @param variable_name Name of the variable rule from the schema.
+     * @param caputre_name Name of the capture group within the variable rule.
+     * @return Match of the capture group.
+     * @return errc::invalid_argument if the variable or capture name is not found.
+     */
+    [[nodiscard]] auto get_capture(
+            std::string const& variable_name,
+            std::string const& capture_name,
+            size_t occurrence
+    ) const -> ystdlib::error_handling::Result<std::string_view>;
 
     /**
      * @return The LogParser whose input buffer this LogEventView references

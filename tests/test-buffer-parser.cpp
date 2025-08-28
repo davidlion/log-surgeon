@@ -1,3 +1,4 @@
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -29,18 +30,54 @@ using std::unordered_map;
 using std::vector;
 
 namespace {
-struct CapturePositions {
+struct ExpectedCapture {
+    ExpectedCapture(
+            std::string_view match,
+            std::vector<PrefixTree::position_t> start_positions,
+            std::vector<PrefixTree::position_t> end_positions
+    )
+            : m_match{match},
+              m_start_positions{std::move(start_positions)},
+              m_end_positions{std::move(end_positions)} {}
+
+    std::string_view m_match;
     std::vector<PrefixTree::position_t> m_start_positions;
     std::vector<PrefixTree::position_t> m_end_positions;
 };
 
 struct ExpectedToken {
+    ExpectedToken(std::string_view raw_string) : ExpectedToken{raw_string, ""} {}
+
+    ExpectedToken(std::string_view raw_string, std::string type)
+            : ExpectedToken{raw_string, std::move(type), {}} {}
+
+    ExpectedToken(
+            std::string_view raw_string,
+            std::string type,
+            std::map<string, ExpectedCapture> captures
+    )
+            : m_raw_string{raw_string},
+              m_type{std::move(type)},
+              m_captures{std::move(captures)} {}
+
     std::string_view m_raw_string;
     std::string m_type;
-    std::map<string, CapturePositions> m_captures;
+    std::map<string, ExpectedCapture> m_captures;
 };
 
 struct ExpectedEvent {
+    ExpectedEvent(std::string_view logtype, std::vector<ExpectedToken> tokens)
+            : ExpectedEvent{logtype, "", std::move(tokens)} {}
+
+    ExpectedEvent(
+            std::string_view logtype,
+            std::string_view timestamp_raw,
+            std::vector<ExpectedToken> tokens
+    )
+            : m_logtype{logtype},
+              m_timestamp_raw{timestamp_raw},
+              m_tokens{std::move(tokens)} {}
+
     std::string_view m_logtype;
     std::string_view m_timestamp_raw;
     std::vector<ExpectedToken> m_tokens;
@@ -107,7 +144,7 @@ auto parse_and_validate(
             CAPTURE(i);
             REQUIRE(expected_raw_string == token.to_string());
 
-            uint32_t expected_token_type;
+            uint32_t expected_token_type{};
             if (expected_type.empty()) {
                 expected_token_type = static_cast<uint32_t>(SymbolId::TokenUncaughtString);
             } else {
@@ -141,9 +178,13 @@ auto parse_and_validate(
                             token.get_reversed_reg_positions(start_reg_id)
                     };
                     auto const actual_end_positions{token.get_reversed_reg_positions(end_reg_id)};
-                    auto const [expected_start_positions, expected_end_positions]{
+                    auto const [expected_match, expected_start_positions, expected_end_positions]{
                             expected_captures.at(capture_name)
                     };
+                    auto const variable_name{event.get_log_parser().get_id_symbol(token_type)};
+                    auto const capture_match{event.get_capture(variable_name, capture_name)};
+                    REQUIRE(false == capture_match.has_error());
+                    REQUIRE(expected_match == capture_match.value());
                     REQUIRE(expected_start_positions == actual_start_positions);
                     REQUIRE(expected_end_positions == actual_end_positions);
                 }
@@ -207,15 +248,12 @@ TEST_CASE("single_line_without_capture", "[BufferParser]") {
     constexpr string_view cVarSchema{"myVar:userID=123"};
     constexpr string_view cInput{"userID=123 userID=234 userID=123 123 userID=123"};
     ExpectedEvent const expected_event{
-            .m_logtype{R"(<myVar> userID=234 <myVar> 123 <myVar>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{
-                    {{"userID=123", "myVar", {}},
-                     {" userID=234", "", {}},
-                     {" userID=123", "myVar", {}},
-                     {" 123", "", {}},
-                     {" userID=123", "myVar", {}}}
-            }
+            R"(<myVar> userID=234 <myVar> 123 <myVar>)",
+            {ExpectedToken{"userID=123", "myVar"},
+             ExpectedToken{" userID=234"},
+             ExpectedToken{" userID=123", "myVar"},
+             ExpectedToken{" 123"},
+             ExpectedToken{" userID=123", "myVar"}}
     };
 
     Schema schema;
@@ -282,15 +320,12 @@ TEST_CASE("single_line_with_capture", "[BufferParser]") {
     constexpr string_view cInput{"userID=123 userID=234 userID=123 123 userID=123"};
 
     ExpectedEvent const expected_event{
-            .m_logtype{R"(userID=<uid> userID=234  userID=<uid> 123  userID=<uid>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{
-                    {{"userID=123", "myVar", {{{"uid", {{7}, {10}}}}}},
-                     {" userID=234", "", {}},
-                     {" userID=123", "myVar", {{{"uid", {{29}, {32}}}}}},
-                     {" 123", "", {}},
-                     {" userID=123", "myVar", {{{"uid", {{44}, {47}}}}}}}
-            }
+            R"(userID=<uid> userID=234  userID=<uid> 123  userID=<uid>)",
+            {ExpectedToken{"userID=123", "myVar", {{"uid", ExpectedCapture{"123", {7}, {10}}}}},
+             ExpectedToken{" userID=234"},
+             ExpectedToken{" userID=123", "myVar", {{"uid", ExpectedCapture{"123", {29}, {32}}}}},
+             ExpectedToken{" 123"},
+             ExpectedToken{" userID=123", "myVar", {{"uid", ExpectedCapture{"123", {44}, {47}}}}}}
     };
 
     Schema schema;
@@ -380,24 +415,26 @@ TEST_CASE("single_line_with_clp_default_vars", "[BufferParser]") {
     constexpr string_view cInput{"2012-12-12 12:12:12.123 123 123.123 abc userID=123 text user123 "
                                  "\n2012-12-12 12:12:12.123"};
     ExpectedEvent const expected_event1{
-            .m_logtype{" <int> <float> <hex>  userID=<val> text <hasNumber> \n"},
-            .m_timestamp_raw{"2012-12-12 12:12:12.123"},
-            .m_tokens{
-                    {{"2012-12-12 12:12:12.123", "firstTimestamp", {}},
-                     {" 123", "int", {}},
-                     {" 123.123", "float", {}},
-                     {" abc", "hex", {}},
-                     {" userID=123", "keyValuePair", {{{"val", {{47}, {50}}}}}},
-                     {" text", "", {}},
-                     {" user123", "hasNumber", {}},
-                     {" ", "", {}},
-                     {"\n", "", {}}}
-            }
+            " <int> <float> <hex>  userID=<val> text <hasNumber> \n",
+            "2012-12-12 12:12:12.123",
+            {ExpectedToken{"2012-12-12 12:12:12.123", "firstTimestamp"},
+             ExpectedToken{" 123", "int"},
+             ExpectedToken{" 123.123", "float"},
+             ExpectedToken{" abc", "hex"},
+             ExpectedToken{
+                     " userID=123",
+                     "keyValuePair",
+                     {{"val", ExpectedCapture{"123", {47}, {50}}}}
+             },
+             ExpectedToken{" text"},
+             ExpectedToken{" user123", "hasNumber"},
+             ExpectedToken{" "},
+             ExpectedToken{"\n"}}
     };
     ExpectedEvent const expected_event2{
-            .m_logtype{R"()"},
-            .m_timestamp_raw{"2012-12-12 12:12:12.123"},
-            .m_tokens{{{"2012-12-12 12:12:12.123", "newLineTimestamp", {}}}}
+            R"()",
+            "2012-12-12 12:12:12.123",
+            {ExpectedToken{"2012-12-12 12:12:12.123", "newLineTimestamp"}}
     };
 
     Schema schema;
@@ -461,14 +498,12 @@ TEST_CASE("multi_line_with_newline_static_var_sequence", "[BufferParser]") {
     constexpr string_view cVarSchema{R"(int:\-{0,1}[0-9]+)"};
     constexpr string_view cInput{"1234567\nText 1234567"};
     ExpectedEvent const expected_event1{
-            .m_logtype{R"(<int><newLine>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {"\n", "newLine", {}}}}
+            R"(<int><newLine>)",
+            {ExpectedToken{"1234567", "int"}, ExpectedToken{"\n", "newLine"}}
     };
     ExpectedEvent const expected_event2{
-            .m_logtype{R"(Text <int>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"Text", "", {}}, {" 1234567", "int", {}}}}
+            R"(Text <int>)",
+            {ExpectedToken{"Text"}, ExpectedToken{" 1234567", "int"}}
     };
 
     Schema schema;
@@ -519,14 +554,17 @@ TEST_CASE("multi_line_with_static_newline_static_var_sequence", "[BufferParser]"
     constexpr string_view cVarSchema{R"(int:\-{0,1}[0-9]+)"};
     constexpr string_view cInput{"1234567 abc\nText 1234567"};
     ExpectedEvent const expected_event1{
-            .m_logtype{R"(<int> abc<newLine>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {" abc", "", {}}, {"\n", "newLine", {}}}}
+            R"(<int> abc<newLine>)",
+            {ExpectedToken{"1234567", "int"},
+             ExpectedToken{" abc"},
+             ExpectedToken{
+                     "\n",
+                     "newLine",
+             }}
     };
     ExpectedEvent const expected_event2{
-            .m_logtype{R"(Text <int>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"Text", "", {}}, {" 1234567", "int", {}}}}
+            R"(Text <int>)",
+            {ExpectedToken{"Text"}, ExpectedToken{" 1234567", "int"}}
     };
 
     Schema schema;
@@ -574,15 +612,10 @@ TEST_CASE("multi_line_with_static_newline_var_sequence", "[BufferParser]") {
     constexpr string_view cVarSchema{R"(int:\-{0,1}[0-9]+)"};
     constexpr string_view cInput{"1234567 abc\n1234567"};
     ExpectedEvent const expected_event1{
-            .m_logtype{"<int> abc\n"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {" abc", "", {}}, {"\n", "", {}}}}
+            "<int> abc\n",
+            {ExpectedToken{"1234567", "int"}, ExpectedToken{" abc"}, ExpectedToken{"\n"}}
     };
-    ExpectedEvent const expected_event2{
-            .m_logtype{R"(<int>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}}}
-    };
+    ExpectedEvent const expected_event2{R"(<int>)", {ExpectedToken{"1234567", "int"}}};
 
     Schema schema;
     schema.add_delimiters(cDelimitersSchema);
@@ -632,16 +665,14 @@ TEST_CASE("multi_line_with_static_newline_var_newline_sequence", "[BufferParser]
     constexpr string_view cVarSchema{R"(int:\-{0,1}[0-9]+)"};
     constexpr string_view cInput{"1234567 abc\n1234567\n"};
     ExpectedEvent const expected_event1{
-            .m_logtype{"<int> abc\n"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {" abc", "", {}}, {"\n", "", {}}}}
+            "<int> abc\n",
+            {ExpectedToken{"1234567", "int"}, ExpectedToken{" abc"}, ExpectedToken{"\n"}}
     };
     ExpectedEvent const expected_event2{
-            .m_logtype{R"(<int><newLine>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {"\n", "newLine", {}}}}
+            R"(<int><newLine>)",
+            {ExpectedToken{"1234567", "int"}, ExpectedToken{"\n", "newLine"}}
     };
-    ExpectedEvent const expected_event3{.m_logtype{""}, .m_timestamp_raw{""}, .m_tokens{}};
+    ExpectedEvent const expected_event3{"", {}};
 
     Schema schema;
     schema.add_delimiters(cDelimitersSchema);
@@ -689,15 +720,10 @@ TEST_CASE("multi_line_with_delim_newline_var_sequence", "[BufferParser]") {
     constexpr string_view cRule{R"(int:\-{0,1}[0-9]+)"};
     constexpr string_view cInput{"1234567 \n1234567"};
     ExpectedEvent const expected_event1{
-            .m_logtype{"<int> \n"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}, {" ", "", {}}, {"\n", "", {}}}}
+            "<int> \n",
+            {ExpectedToken{"1234567", "int"}, ExpectedToken{" "}, ExpectedToken{"\n"}}
     };
-    ExpectedEvent const expected_event2{
-            .m_logtype{R"(<int>)"},
-            .m_timestamp_raw{""},
-            .m_tokens{{{"1234567", "int", {}}}}
-    };
+    ExpectedEvent const expected_event2{R"(<int>)", {ExpectedToken{"1234567", "int"}}};
 
     Schema schema;
     schema.add_delimiters(cDelimitersSchema);
@@ -799,50 +825,42 @@ TEST_CASE("multi_line_with_delimited_vars", "[BufferParser]") {
             "Perform App::Action App::Action1 ::App::Action::Action1 on word::my/path/to/file.txt"
     };
     ExpectedEvent const expected_event1{
-            .m_logtype{
-                    "[WARNING] A:2 [<path>:150] insert node:<path>, id:7 and <path>, id:8<newLine>"
-            },
-            .m_timestamp_raw{""},
-            .m_tokens{
-                    {{"[WARNING]", "", {}},
-                     {" A", "", {}},
-                     {":2", "", {}},
-                     {" ", "", {}},
-                     {"[folder/file.cc", "path", {}},
-                     {":150]", "", {}},
-                     {" insert", "", {}},
-                     {" node", "", {}},
-                     {":folder/file-op7", "path", {}},
-                     {",", "", {}},
-                     {" id", "", {}},
-                     {":7", "", {}},
-                     {" and", "", {}},
-                     {" folder/file-op8", "path", {}},
-                     {",", "", {}},
-                     {" id", "", {}},
-                     {":8", "", {}},
-                     {"\n", "newLine", {}}}
-            }
+            "[WARNING] A:2 [<path>:150] insert node:<path>, id:7 and <path>, id:8<newLine>",
+            {ExpectedToken{"[WARNING]"},
+             ExpectedToken{" A"},
+             ExpectedToken{":2"},
+             ExpectedToken{" "},
+             ExpectedToken{"[folder/file.cc", "path"},
+             ExpectedToken{":150]"},
+             ExpectedToken{" insert"},
+             ExpectedToken{" node"},
+             ExpectedToken{":folder/file-op7", "path"},
+             ExpectedToken{","},
+             ExpectedToken{" id"},
+             ExpectedToken{":7"},
+             ExpectedToken{" and"},
+             ExpectedToken{" folder/file-op8", "path"},
+             ExpectedToken{","},
+             ExpectedToken{" id"},
+             ExpectedToken{":8"},
+             ExpectedToken{"\n", "newLine"}}
     };
     ExpectedEvent const expected_event2{
-            .m_logtype{"Perform App::Action <function> ::App::<function> on word::<path>"},
-            .m_timestamp_raw{""},
-            .m_tokens{
-                    {{"Perform", "", {}},
-                     {" App", "", {}},
-                     {":", "", {}},
-                     {":Action", "", {}},
-                     {" App::Action1", "function", {}},
-                     {" ", "", {}},
-                     {":", "", {}},
-                     {":App", "", {}},
-                     {":", "", {}},
-                     {":Action::Action1", "function", {}},
-                     {" on", "", {}},
-                     {" word", "", {}},
-                     {":", "", {}},
-                     {":my/path/to/file.txt", "path", {}}}
-            }
+            "Perform App::Action <function> ::App::<function> on word::<path>",
+            {ExpectedToken{"Perform"},
+             ExpectedToken{" App"},
+             ExpectedToken{":"},
+             ExpectedToken{":Action"},
+             ExpectedToken{" App::Action1", "function"},
+             ExpectedToken{" "},
+             ExpectedToken{":"},
+             ExpectedToken{":App"},
+             ExpectedToken{":"},
+             ExpectedToken{":Action::Action1", "function"},
+             ExpectedToken{" on"},
+             ExpectedToken{" word"},
+             ExpectedToken{":"},
+             ExpectedToken{":my/path/to/file.txt", "path"}}
     };
 
     Schema schema;
